@@ -131,15 +131,33 @@ and is shared only with the messaging provider that transmits them. See the
 
 <script>
 (function () {
-  // Base URL of the OmniTenant API that performs the verification. Until this is set to a
-  // deployed origin the form does not pretend to work — it says so, rather than showing a
-  // success screen for a message that was never sent.
+  // Base URL of the opt-in Function that performs the verification (OMAPI-357).
+  // Until this is set to a deployed origin the form does not pretend to work — it says
+  // so, rather than showing a success screen for a message that was never sent.
+  // This is the ONLY value that needs changing at deploy time.
   var API_BASE = "";
+
+  // Identifies the disclosure text below, and is recorded with the consent. Must match an
+  // entry in the Function's OptIn:AcceptedDisclosureVersions or the request is refused —
+  // deliberately, so a consent record can always say what was on screen when it was given.
+  // Bump both together if the disclosures are reworded.
+  var DISCLOSURE_VERSION = "2026-07-31";
 
   var form = document.getElementById("optin-form");
   var phone = document.getElementById("phone");
   var consent = document.getElementById("consent");
   var messages = document.getElementById("messages");
+
+  // The number the code was sent to. The check call needs it as well as the code — the
+  // endpoint is public and holds no session, so there is nothing to remember us by.
+  var pendingPhone = "";
+
+  function failed(response) {
+    if (response.status === 429) {
+      return "Too many attempts just now. Please wait a few minutes and try again.";
+    }
+    return "We could not reach the verification service (" + response.status + ").";
+  }
 
   function show(id) {
     ["step-number", "step-code", "step-done"].forEach(function (s) {
@@ -165,13 +183,19 @@ and is shared only with the messaging provider that transmits them. See the
                   "No message was sent and no consent was recorded.");
     }
 
-    fetch(API_BASE + "/api/tenants/mine/phone/verification", {
+    pendingPhone = phone.value.trim();
+
+    fetch(API_BASE + "/public/phone-verification/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: phone.value.trim(), consent: true })
+      body: JSON.stringify({
+        phone: pendingPhone,
+        consent: true,
+        disclosureVersion: DISCLOSURE_VERSION
+      })
     }).then(function (r) {
-      if (!r.ok) { throw new Error("Request failed (" + r.status + ")"); }
-      document.getElementById("echo-number").textContent = phone.value.trim();
+      if (!r.ok) { throw new Error(failed(r)); }
+      document.getElementById("echo-number").textContent = pendingPhone;
       show("step-code");
     }).catch(function (err) {
       note("We could not send a code just now. " + err.message);
@@ -183,12 +207,20 @@ and is shared only with the messaging provider that transmits them. See the
     var code = document.getElementById("code").value.trim();
     if (!code) { return note("Enter the 6-digit code we sent you."); }
 
-    fetch(API_BASE + "/api/tenants/mine/phone/verification/check", {
+    fetch(API_BASE + "/public/phone-verification/check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: code })
+      body: JSON.stringify({ phone: pendingPhone, code: code })
     }).then(function (r) {
-      if (!r.ok) { throw new Error("That code was not accepted."); }
+      if (!r.ok) { throw new Error(failed(r)); }
+      return r.json();
+    }).then(function (result) {
+      // A wrong code is a 200 with verified:false, not an error status. Treating any
+      // 200 as success would show the confirmation screen to someone who never proved
+      // they own the number — the whole thing this step exists to establish.
+      if (!result || result.verified !== true) {
+        return note("That code was not correct, or it has expired. Check the message and try again.");
+      }
       show("step-done");
     }).catch(function (err) {
       note(err.message);
@@ -199,6 +231,10 @@ and is shared only with the messaging provider that transmits them. See the
     e.preventDefault();
     messages.innerHTML = "";
     consent.checked = false;
+    // Starting over means consenting again — the box is cleared above, and the number
+    // the previous attempt was sent to must not linger into the next check call.
+    pendingPhone = "";
+    document.getElementById("code").value = "";
     show("step-number");
   });
 })();
